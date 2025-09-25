@@ -189,7 +189,7 @@ class Tracker {
     }
 
     cmap.set(connid, new ConnW(sock));
-    sock.on("close", (haderr) => cmap.delete(connid));
+    sock.on("close", (_haderr) => cmap.delete(connid));
 
     return connid;
   }
@@ -238,7 +238,7 @@ const maxHeapSnaps = 20;
 const maxCertUpdateAttempts = 20;
 let adjTimer = null;
 
-((main) => {
+((_main) => {
   // listen for "go" and start the server
   system.sub("go", systemUp);
   // listen for "end" and stop the server
@@ -452,7 +452,10 @@ function systemUp() {
  * @param {int} n
  */
 async function certUpdateForever(secopts, s, n = 0) {
-  if (n > maxCertUpdateAttempts) return false;
+  if (n > maxCertUpdateAttempts) {
+    console.error("crt: max update attempts reached", n);
+    return false;
+  }
 
   const crtpem = secopts.cert;
   if (bufutil.emptyBuf(crtpem)) {
@@ -567,7 +570,7 @@ function trapServerEvents(id, s) {
   });
 
   // emitted when the req is discarded due to maxConnections
-  s.on("drop", (data) => {
+  s.on("drop", (_data) => {
     stats.nofdrops += 1;
     stats.nofconns += 1;
   });
@@ -665,7 +668,7 @@ function trapSecureServerEvents(id, s) {
   });
 
   // emitted when the req is discarded due to maxConnections
-  s.on("drop", (data) => {
+  s.on("drop", (_data) => {
     stats.nofdrops += 1;
     stats.nofconns += 1;
   });
@@ -673,26 +676,13 @@ function trapSecureServerEvents(id, s) {
   s.on("tlsClientError", (err, /** @type {TLSSocket} */ tlsSocket) => {
     stats.tlserr += 1;
     // fly tcp healthchecks also trigger tlsClientErrors
-    log.d("tls: client err;", err.message, addrstr(tlsSocket));
+    // log.d("tls: client err;", err.message, addrstr(tlsSocket));
     close(tlsSocket);
   });
 }
 
 /**
- * @param {TLSSocket|Socket} sock
- */
-function addrstr(sock) {
-  if (!sock) return "";
-  if (sock.localAddress == null || sock.remoteAddress == null) return "";
-  return (
-    `[${sock.localAddress}]:${sock.localPort}` +
-    "->" +
-    `[${sock.remoteAddress}]:${sock.remotePort}`
-  );
-}
-
-/**
- * @param {tls.Server} s
+ * @param {tls.Server?} s
  * @returns {void}
  */
 function rotateTkt(s) {
@@ -725,7 +715,7 @@ function up(server, addr) {
 
 /**
  * RST and/or closes tcp socket.
- * @param {Socket | TLSSocket} sock
+ * @param {Socket | TLSSocket | null} sock
  */
 function close(sock) {
   if (!sock || sock.destroyed) return;
@@ -735,14 +725,14 @@ function close(sock) {
 }
 
 /**
- * @param {Http2ServerResponse} res
+ * @param {Http2ServerResponse?} res
  */
 function resClose(res) {
   if (res && !res.destroy) res.destroy();
 }
 
 /**
- * @param {Http2ServerResponse} res
+ * @param {Http2ServerResponse?} res
  * @returns {Boolean}
  */
 function resOkay(res) {
@@ -751,20 +741,21 @@ function resOkay(res) {
 }
 
 /**
- * @param {Socket} sock
+ * @param {Socket?} sock
  * @returns {Boolean}
  */
 function tcpOkay(sock) {
-  return sock.writable;
+  return sock && sock.writable;
 }
 
 /**
  * Creates a duplex pipe between `a` and `b` sockets.
- * @param {Socket} a
- * @param {Socket} b
+ * @param {Socket?} a
+ * @param {Socket?} b
  * @return {Boolean} - true if pipe created, false if error
  */
 function proxySockets(a, b) {
+  if (!a || !b) return false;
   if (a.destroyed || b.destroyed) return false;
   // handle errors? stackoverflow.com/a/61091744
   a.pipe(b);
@@ -825,7 +816,7 @@ function serveDoTProxyProto(clientSocket) {
     }
   }
 
-  clientSocket.on("error", (e) => {
+  clientSocket.on("error", (_e) => {
     log.w("pp: client err, closing");
     close(clientSocket);
     close(dotSock);
@@ -911,10 +902,15 @@ function getDnRE(socket) {
 
 /**
  * Gets flag and hostname from the wildcard domain name.
- * @param {String} sni - Wildcard SNI
- * @return {Array<String>} [flag, hostname]
+ * @param {String?} sni - Wildcard SNI
+ * @return {<[String, String]>} [flag, hostname] - may be empty strings
  */
 function getMetadata(sni) {
+  const fakesni = envutil.allowDomainFronting();
+
+  if (util.emptyString(sni)) {
+    return ["", fakesni ? "nosni.tld" : ""];
+  }
   // 1-flag.max.rethinkdns.com => ["1-flag", "max", "rethinkdns", "com"]
   // 1-flag.somedomain.tld => ["1-flag", "somedomain", "tld"]
   const s = sni.split(".");
@@ -931,7 +927,7 @@ function getMetadata(sni) {
     return [flag, host];
   } else {
     // sni => max.rethinkdns.com
-    log.d(`flag: "", host: ${host}`);
+    log.d(`flag: "", host: ${sni}`);
     return ["", sni];
   }
 }
@@ -942,23 +938,25 @@ function getMetadata(sni) {
  */
 function serveTLS(socket) {
   const sni = socket.servername;
-  if (!sni) {
-    log.d("no sni, close conn");
-    close(socket);
-    return;
-  }
+  if (!envutil.allowDomainFronting()) {
+    if (!sni) {
+      log.d("no sni, close conn");
+      close(socket);
+      return;
+    }
 
-  if (!OUR_RG_DN_RE || !OUR_WC_DN_RE) {
-    [OUR_RG_DN_RE, OUR_WC_DN_RE] = getDnRE(socket);
-  }
+    if (!OUR_RG_DN_RE || !OUR_WC_DN_RE) {
+      [OUR_RG_DN_RE, OUR_WC_DN_RE] = getDnRE(socket);
+    }
 
-  const isOurRgDn = OUR_RG_DN_RE.test(sni);
-  const isOurWcDn = OUR_WC_DN_RE.test(sni);
+    const isOurRgDn = OUR_RG_DN_RE.test(sni);
+    const isOurWcDn = OUR_WC_DN_RE.test(sni);
 
-  if (!isOurWcDn && !isOurRgDn) {
-    log.w("unexpected sni, close conn", sni);
-    close(socket);
-    return;
+    if (!isOurWcDn && !isOurRgDn) {
+      log.w("unexpected sni, close conn", sni);
+      close(socket);
+      return;
+    }
   }
 
   if (false) {
@@ -969,10 +967,10 @@ function serveTLS(socket) {
     log.d(`(${proto}), reused? ${reused}; ticket: ${tkt}; sess: ${sess}`);
   }
 
-  const [flag, host] = isOurWcDn ? getMetadata(sni) : ["", sni];
+  const [flag, host] = getMetadata(sni);
   const sb = new ScratchBuffer();
 
-  log.d("----> dot request", host, flag);
+  log.d("----> dot request", flag, host);
   socket.on("data", async (data) => {
     const len = await handleTCPData(socket, data, sb, host, flag);
     adjustTLSFragAfterWrites(socket, len);
@@ -998,7 +996,7 @@ function serveTCP(socket) {
 /**
  * Handle DNS over TCP/TLS data stream.
  * @param {Socket} socket
- * @param {Buffer} chunk - A TCP data segment
+ * @param {ArrayBuffer} chunk - A TCP data segment
  * @param {ScratchBuffer} sb - Scratch buffer
  * @param {String} host - Hostname
  * @param {String} flag - Blocklist Flag
@@ -1037,7 +1035,7 @@ async function handleTCPData(socket, chunk, sb, host, flag) {
   // chunk out dns-query starting rem-th byte
   const data = chunk.slice(rem, qlimit);
   // out of band data, if any
-  const oob = chunk.slice(qlimit);
+  const oob = qlimit < cl ? chunk.slice(qlimit) : null;
 
   sb.allocOnce(qlen);
 
@@ -1105,7 +1103,7 @@ async function handleTCPQuery(q, socket, host, flag) {
  * @param {string} rxid
  * @param {Socket} socket
  * @param {Uint8Array} data
- * @param {int} n - bytes written to socket
+ * @returns {int} n - bytes written to socket
  */
 function measuredWrite(rxid, socket, data) {
   let ok = tcpOkay(socket);
